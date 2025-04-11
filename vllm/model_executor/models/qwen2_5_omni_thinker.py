@@ -37,6 +37,7 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor)
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -144,22 +145,23 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
         fps: Optional[Union[float, List[float]]] = None,
         **kwargs: object,
     ) -> Qwen2_5OmniProcessor:
-        if fps is not None:
-            kwargs["fps"] = fps
-        processor = self.ctx.get_hf_processor(
-            Qwen2_5OmniProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size),
-            **kwargs,
-        )
-        if not hasattr(processor, "audio_token"):
-            processor.audio_token = "<|AUDIO|>"
-        if not hasattr(processor, "image_token"):
-            processor.image_token = "<|IMAGE|>"
-        if not hasattr(processor, "video_token"):
-            processor.video_token = "<|VIDEO|>"
-        return processor
+        hf_processor = self.ctx.get_hf_processor(Qwen2_5OmniProcessor)
+        image_processor = hf_processor.image_processor  # type: ignore
+        # assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
+
+        if min_pixels:
+            image_processor.min_pixels = min_pixels
+        if max_pixels:
+            image_processor.max_pixels = max_pixels
+        if max_pixels or min_pixels:
+            image_processor.size = size
+        if not hasattr(hf_processor, "audio_token"):
+            hf_processor.audio_token = "<|AUDIO|>"
+        if not hasattr(hf_processor, "image_token"):
+            hf_processor.image_token = "<|IMAGE|>"
+        if not hasattr(hf_processor, "video_token"):
+            hf_processor.video_token = "<|VIDEO|>"
+        return hf_processor
 
     def get_feature_extractor(
         self,
@@ -325,19 +327,18 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         (
             prompt_ids,
             mm_kwargs,
-            is_update_applied,
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
             hf_processor_mm_kwargs,
         )
-
-        unbound_prompt_updates = self._get_prompt_updates(
+        is_update_applied = False
+        unbound_prompt_updates = self._get_prompt_replacements(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
+        mm_prompt_updates = self._bind_and_group_repls(
             unbound_prompt_updates)
 
         mm_item_counts = mm_items.get_all_counts()
@@ -364,7 +365,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 prompt_ids,
                 prompt,
                 mm_placeholders,
-            ) = self._apply_prompt_updates(
+            ) = self._apply_prompt_replacements(
                 prompt_ids,
                 mm_prompt_updates,
                 mm_item_counts,
@@ -394,7 +395,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_placeholders=mm_placeholder_ranges,
         )
 
-    def _get_prompt_updates(
+    def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
@@ -522,7 +523,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_counts,
         )
 
-        _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
+        _, mm_kwargs = self._apply_hf_processor_text_mm(
             prompt_text=dummy_inputs.prompt_text,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -888,13 +889,15 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             if modality == "video":
                 placeholder_token_id = self.config.video_token_index
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, embeddings, placeholder_token_id)
+                input_ids, inputs_embeds, embeddings[0], placeholder_token_id)
         return inputs_embeds
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -910,10 +913,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 input_ids, multimodal_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(input_ids=input_ids,
+                                                  positions=positions,
+                                                  kv_caches=kv_caches,
+                                                  attn_metadata=attn_metadata,
+                                                  intermediate_tensors=intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds,)
         return hidden_states
 
     def compute_logits(

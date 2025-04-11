@@ -33,8 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.models.qwen2_5_vl import (Qwen2_5_VLImageProcessor,
-                                            Qwen2_5_VLProcessor)
+from transformers.models.qwen2_5_vl import (Qwen2_5_VLProcessor)
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
@@ -721,7 +720,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     ) -> Qwen2_5_VLProcessor:
         hf_processor = self.ctx.get_hf_processor(Qwen2_5_VLProcessor)
         image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
+        # assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
 
         if min_pixels:
             image_processor.min_pixels = min_pixels
@@ -741,14 +740,14 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
         fps: Optional[float] = 2.0,
-    ) -> Qwen2_5_VLImageProcessor:
+    ):
         hf_processor = self.get_hf_processor(
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             fps=fps,
         )
         image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
+        # assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
         return image_processor
 
 

@@ -76,6 +76,7 @@ def run_qwen2_5_omni(question: str, audio_count: int):
         max_model_len=4096,
         max_num_seqs=5,
         limit_mm_per_prompt={"audio": audio_count},
+        dtype="bfloat16",
     )
 
     audio_in_prompt = "".join([
