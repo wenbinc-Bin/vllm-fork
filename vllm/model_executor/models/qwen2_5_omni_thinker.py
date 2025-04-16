@@ -889,7 +889,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             if modality == "video":
                 placeholder_token_id = self.config.video_token_index
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, embeddings[0], placeholder_token_id)
+                input_ids, inputs_embeds, embeddings, placeholder_token_id)
         return inputs_embeds
 
     def forward(

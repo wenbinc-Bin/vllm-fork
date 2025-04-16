@@ -668,7 +668,10 @@ def _hpu_merge_multimodal_embeddings(
     """
     batch_size, seq_length, hidden_size = inputs_embeds.shape
     inputs_embeds = inputs_embeds.reshape(-1, hidden_size)
-    multimodal_embeddings = multimodal_embeddings.reshape(-1, hidden_size)
+    if isinstance(multimodal_embeddings, torch.Tensor):
+        multimodal_embeddings = multimodal_embeddings.reshape(-1, hidden_size)
+    else:
+        multimodal_embeddings = torch.cat(tuple(t.reshape(-1, hidden_size) for t in multimodal_embeddings))
     placeholder_token_id = torch.tensor(placeholder_token_id,
                                         device=input_ids.device)
     mask = torch.isin(input_ids.reshape(-1), placeholder_token_id)
