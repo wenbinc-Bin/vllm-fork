@@ -408,9 +408,15 @@ class HpuModelAdapter(torch.nn.Module):
         if 'virtual_engine' in kwargs:
             virtual_engine = kwargs.pop('virtual_engine')
         input_ids = kwargs['input_ids']
-        kwargs['attn_metadata'] = self._update_metadata(
-            kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
-            input_ids.device, self.dtype)
+        if input_ids is not None:
+          kwargs['attn_metadata'] = self._update_metadata(
+              kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
+              input_ids.device, self.dtype)
+        else:
+            inputs_embeds = kwargs['inputs_embeds']
+            kwargs['attn_metadata'] = self._update_metadata(
+              kwargs['attn_metadata'], inputs_embeds.size(0), inputs_embeds.size(1),
+              inputs_embeds.device, self.dtype)
         if 'lora_mask' in kwargs:
             LoraMask.setLoraMask(kwargs.pop('lora_mask'))
         model_config = getattr(self.model, "config", None)
@@ -2623,7 +2629,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 "intermediate_tensors": intermediate_tensors,
                 "lora_mask": lora_mask,
                 "virtual_engine": model_input.virtual_engine,
-                **(model_input.multi_modal_kwargs or {}),
             }
             if previous_hidden_states is not None:
                 execute_model_kwargs.update(
@@ -2678,7 +2683,14 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     'real_seq_len': model_input.seq_lens,
                     'real_batch_size': real_batch_size
                 }
-
+                if self.model_config.is_multimodal_model:
+                    multimodal_embeddings = self.model.model.get_multimodal_embeddings(
+                        **(model_input.multi_modal_kwargs or {}))
+                    inputs_embeds = self.model.model.get_input_embeddings(
+                        execute_model_kwargs['input_ids'], multimodal_embeddings)
+                    execute_model_kwargs.update({
+                        "inputs_embeds": inputs_embeds,
+                        "input_ids": None})
                 with self.profiler.record_event('internal',
                                                 model_event_name,
                                                 args=profiler_args):
