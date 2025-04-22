@@ -852,6 +852,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                     layer_names=path_to_rope)
             msg = f"Compiling took {m_wrap.get_summary_string()}"
             logger.info(msg)
+            with HabanaMemoryProfiler() as m_wrap:
+                if htorch.utils.internal.is_lazy():
+                    self.model.model.visual = htorch.hpu.wrap_in_hpu_graph(
+                        self.model.model.visual, disable_tensor_cache=True)
+                    # self.model.model.audio_tower = htorch.hpu.wrap_in_hpu_graph(
+                    #     self.model.model.audio_tower)
+            msg = f"Wrapping multi_modal_embeddings in HPU Graph took {m_wrap.get_summary_string()}"
 
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"

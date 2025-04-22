@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from math import ceil
 from transformers import BatchFeature
 from transformers.models.qwen2_5_vl import (Qwen2_5_VLProcessor)
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
@@ -265,6 +266,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
+        attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -314,11 +316,13 @@ class Qwen2_5_VisionAttention(nn.Module):
                 q_i = q[:, start_idx:end_idx]
                 k_i = k[:, start_idx:end_idx]
                 v_i = v[:, start_idx:end_idx]
+                attention_mask_i = attention_mask[:,:,:,start_idx:end_idx] \
+                    if attention_mask is not None else None
                 q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
                                  for x in [q_i, k_i, v_i])
                 if is_hpu:
                     from habana_frameworks.torch.hpex.kernels import FusedSDPA
-                    output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0)
+                    output_i = FusedSDPA.apply(q_i, k_i, v_i, attention_mask_i, 0.0,)
                 else:
                     output_i = F.scaled_dot_product_attention(q_i,
                                                               k_i,
@@ -374,10 +378,12 @@ class Qwen2_5_VisionBlock(nn.Module):
                                      prefix=f"{prefix}.mlp")
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
-                rotary_pos_emb: torch.Tensor) -> torch.Tensor:
+                rotary_pos_emb: torch.Tensor,
+                attention_mask: torch.Tensor = None) -> torch.Tensor:
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
-                          rotary_pos_emb=rotary_pos_emb)
+                          rotary_pos_emb=rotary_pos_emb,
+                          attention_mask=attention_mask)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -606,58 +612,175 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
-    def forward(
+    def preprocess_hpu(
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor,
-    ) -> torch.Tensor:
-        # patchify
+    ):
+        pad_hidden_size = 6592 # 28*28*1280/patch_size/patch_size
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
+        # pad grid_w and grid_h
+        vit_merger_window_size = (self.window_size //
+                          self.spatial_merge_size // self.patch_size)
+        grid_t, grid_h, grid_w = grid_thw[0]
+        flatten_grid_h = grid_h // self.spatial_merge_size
+        flatten_grid_w = grid_w * self.spatial_merge_size
+        padded_grid_h = ceil(grid_h / self.spatial_merge_size / vit_merger_window_size) \
+          * self.spatial_merge_size * vit_merger_window_size
+        padded_grid_w = ceil(grid_w / self.spatial_merge_size / vit_merger_window_size) \
+          * self.spatial_merge_size * vit_merger_window_size
+        flatten_padded_grid_h = padded_grid_h // self.spatial_merge_size
+        flatten_padded_grid_w = padded_grid_w * self.spatial_merge_size
+        # pad w and h for hidden_states
+        _, embed_size = hidden_states.size()
+        hidden_states = hidden_states[:grid_t*grid_h*grid_w, :].reshape(grid_t, flatten_grid_h, flatten_grid_w, -1)
+        padded_hidden_states = torch.zeros(grid_t, flatten_padded_grid_h, flatten_padded_grid_w, embed_size, device=hidden_states.device)
+        padded_hidden_states[:, :flatten_grid_h, :flatten_grid_w, :] = hidden_states
+        hidden_states = padded_hidden_states.reshape(-1, embed_size)
+        attention_mask = torch.zeros(grid_t, flatten_padded_grid_h, flatten_padded_grid_w)
+        attention_mask[:, :flatten_grid_h, :flatten_grid_w] = 1
+        attention_mask = attention_mask.reshape(grid_t*flatten_padded_grid_h*flatten_padded_grid_w)
+        attention_mask = attention_mask == 1
+        attention_mask = attention_mask.to(hidden_states.device)
+        # pad w and h for rotary_emb
+        _, embed_size = rotary_pos_emb.size()
+        rotary_pos_emb = rotary_pos_emb.reshape(grid_t, flatten_grid_h, flatten_grid_w, -1)
+        padded_rotary_pos_emb = torch.zeros(grid_t, flatten_padded_grid_h, flatten_padded_grid_w, embed_size, device=hidden_states.device)
+        torch.fill(padded_rotary_pos_emb, -100)
+        padded_rotary_pos_emb[:, :flatten_grid_h, :flatten_grid_w, :] = rotary_pos_emb
+        rotary_pos_emb = padded_rotary_pos_emb.reshape(-1, embed_size)
         # windows attention
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-
-        if is_hpu:
-            # NOTE: unique_consecutive is a dynamic operation
-            # we are using `remove_duplicates_cpu` instead
-            def remove_duplicates_cpu(a):
-                return [
-                    a[i] for i in range(len(a)) if i == 0 or a[i - 1] != a[i]
-                ]
-
-            cu_window_seqlens = remove_duplicates_cpu(cu_window_seqlens)
-            cu_window_seqlens = torch.tensor(
-                cu_window_seqlens,
-                device=hidden_states.device,
-                dtype=grid_thw.dtype
-                if torch.jit.is_tracing() else torch.int32)
-
-        else:
-            cu_window_seqlens = torch.tensor(
-                cu_window_seqlens,
-                device=hidden_states.device,
-                dtype=grid_thw.dtype
-                if torch.jit.is_tracing() else torch.int32)
-            cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        padded_grid_thw = torch.ones_like(grid_thw)
+        padded_grid_thw[0,0] = grid_t
+        padded_grid_thw[0,1] = padded_grid_h
+        padded_grid_thw[0,2] = padded_grid_w
+        window_index, cu_window_seqlens = self.get_window_index(padded_grid_thw)
+        cu_window_seqlens = torch.arange(0,
+                                         pad_hidden_size+1,
+                                         vit_merger_window_size*vit_merger_window_size*self.spatial_merge_unit,
+                                         device=hidden_states.device)
 
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[window_index, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
+        attention_mask = attention_mask.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit
+        )
+        # pad hidden states
+        pad_len = pad_hidden_size - seq_len
+        padded_hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_len), "constant", 0)
+
+        attention_mask = attention_mask[window_index, :]
+        attention_mask = attention_mask.reshape(1,1,1,seq_len)
+        attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_len), "constant", False)
+
+        seq_len, _ = rotary_pos_emb.size()
         rotary_pos_emb = rotary_pos_emb.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        # pad rotary_pos_emb
+        pad_len = pad_hidden_size - seq_len
+        padded_rotary_pos_emb = torch.nn.functional.pad(rotary_pos_emb, (0, 0, 0, pad_len), "constant", 0)
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+        cu_seqlens = torch.repeat_interleave(torch.Tensor([pad_hidden_size]).to(torch.int64),
                                              grid_thw[:, 0]).cumsum(
                                                  dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+
+        return {"x": padded_hidden_states,
+                "rotary_pos_emb": padded_rotary_pos_emb,
+                "cu_seqlens": cu_seqlens,
+                "cu_window_seqlens": cu_window_seqlens,
+                "attention_mask": attention_mask}, \
+        {"window_index": window_index,
+         "padded_grid_thw": padded_grid_thw,
+         "grid_thw": grid_thw,}
+
+    def postprocess_hpu(
+            self,
+            hidden_states: torch.Tensor,
+            window_index: torch.Tensor,
+            padded_grid_thw: torch.Tensor,
+            grid_thw: torch.Tensor,):
+        reverse_indices = torch.argsort(window_index)
+        hidden_states = hidden_states[reverse_indices, :]
+        _, hidden_emb_size = hidden_states.size()
+        grid_t, gird_h, grid_w = grid_thw[0]
+        llm_grid_h = gird_h // self.spatial_merge_size
+        llm_grid_w = grid_w // self.spatial_merge_size
+        grid_t, padded_grid_h, padded_grid_w = padded_grid_thw[0]
+        padded_llm_grid_h = padded_grid_h // self.spatial_merge_size
+        padded_llm_grid_w = padded_grid_w // self.spatial_merge_size
+        hidden_states = hidden_states.reshape(grid_t, padded_llm_grid_h, padded_llm_grid_w, -1)
+        orig_hidden_states = torch.zeros(grid_t, llm_grid_h, llm_grid_w, hidden_emb_size, device=hidden_states.device)
+        orig_hidden_states = hidden_states[:, :llm_grid_h, :llm_grid_w, :]
+        orig_hidden_states = orig_hidden_states.reshape(grid_t*llm_grid_h*llm_grid_w, -1)
+        return orig_hidden_states
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_thw: torch.Tensor = None,
+        rotary_pos_emb: torch.Tensor = None,
+        cu_seqlens: torch.Tensor = None,
+        cu_window_seqlens: torch.Tensor = None,
+        attention_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        # patchify
+        hidden_states = x.to(device=self.device, dtype=self.dtype)
+
+        # compute position embedding
+        if grid_thw is not None:
+            hidden_states = self.patch_embed(hidden_states)
+            rotary_pos_emb = self.rot_pos_emb(grid_thw)
+            # windows attention
+            window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+
+            if is_hpu:
+                # NOTE: unique_consecutive is a dynamic operation
+                # we are using `remove_duplicates_cpu` instead
+                def remove_duplicates_cpu(a):
+                    return [
+                        a[i] for i in range(len(a)) if i == 0 or a[i - 1] != a[i]
+                    ]
+
+                cu_window_seqlens = remove_duplicates_cpu(cu_window_seqlens)
+                cu_window_seqlens = torch.tensor(
+                    cu_window_seqlens,
+                    device=hidden_states.device,
+                    dtype=grid_thw.dtype
+                    if torch.jit.is_tracing() else torch.int32)
+
+            else:
+                cu_window_seqlens = torch.tensor(
+                    cu_window_seqlens,
+                    device=hidden_states.device,
+                    dtype=grid_thw.dtype
+                    if torch.jit.is_tracing() else torch.int32)
+                cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+
+            seq_len, _ = hidden_states.size()
+            hidden_states = hidden_states.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+            hidden_states = hidden_states[window_index, :, :]
+            seq_len, _ = rotary_pos_emb.size()
+            hidden_states = hidden_states.reshape(seq_len, -1)
+            rotary_pos_emb = rotary_pos_emb.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+            rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+            rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+            # compute cu_seqlens
+            cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                                grid_thw[:, 0]).cumsum(
+                                                    dim=0, dtype=torch.int32)
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
         hidden_states = hidden_states.unsqueeze(1)
@@ -668,12 +791,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens_now = cu_window_seqlens
             hidden_states = blk(hidden_states,
                                 cu_seqlens=cu_seqlens_now,
-                                rotary_pos_emb=rotary_pos_emb)
+                                rotary_pos_emb=rotary_pos_emb,
+                                attention_mask=attention_mask)
 
         # adapter
         hidden_states = self.merger(hidden_states)
-        reverse_indices = torch.argsort(window_index)
-        hidden_states = hidden_states[reverse_indices, :]
+        if grid_thw is not None:
+            reverse_indices = torch.argsort(window_index)
+            hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -947,7 +1072,22 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            if is_hpu:
+                image_embeds = []
+                pixel_offset_start = 0
+                for image_i, _ in enumerate(grid_thw):
+                    grid_t, grid_h, grid_w = grid_thw[image_i]
+                    pixel_offset_end = pixel_offset_start + grid_t*grid_h*grid_w
+                    visual_kwarg, postprosess_kwarg = \
+                        self.visual.preprocess_hpu(pixel_values[pixel_offset_start:pixel_offset_end,:],
+                                                   grid_thw=grid_thw[image_i:image_i+1])
+                    pixel_offset_start = pixel_offset_end
+                    embeds = self.visual(**visual_kwarg)
+                    embeds = self.visual.postprocess_hpu(hidden_states=embeds, **postprosess_kwarg)
+                    image_embeds.append(embeds)
+                image_embeds = torch.cat(image_embeds, dim=0)
+            else:
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
