@@ -617,18 +617,27 @@ class Qwen2_5_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ):
+        # There are some limitations:
+        # max_pixels = 28*28*1280
+        # grid_w * grid_h < max_pixel / patch_size / patch_size = 5120
+        # grid_w / grid_h < 200 or grid_h / grid_w < 200
+        # according to these limitation padding len should be about 140000
+        # which is too large.
+        # So limite ratio to 32:9, and the pad_len is 6592
         pad_hidden_size = 6592 # 28*28*1280/patch_size/patch_size
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        # pad grid_w and grid_h
+
         vit_merger_window_size = (self.window_size //
                           self.spatial_merge_size // self.patch_size)
         grid_t, grid_h, grid_w = grid_thw[0]
+        # x has already been flatted by spatial_merge_unit
         flatten_grid_h = grid_h // self.spatial_merge_size
         flatten_grid_w = grid_w * self.spatial_merge_size
+        # pad grid_w and grid_h
         padded_grid_h = ceil(grid_h / self.spatial_merge_size / vit_merger_window_size) \
           * self.spatial_merge_size * vit_merger_window_size
         padded_grid_w = ceil(grid_w / self.spatial_merge_size / vit_merger_window_size) \
@@ -641,6 +650,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         padded_hidden_states = torch.zeros(grid_t, flatten_padded_grid_h, flatten_padded_grid_w, embed_size, device=hidden_states.device)
         padded_hidden_states[:, :flatten_grid_h, :flatten_grid_w, :] = hidden_states
         hidden_states = padded_hidden_states.reshape(-1, embed_size)
+        # pad w and h for attention_mask
         attention_mask = torch.zeros(grid_t, flatten_padded_grid_h, flatten_padded_grid_w)
         attention_mask[:, :flatten_grid_h, :flatten_grid_w] = 1
         attention_mask = attention_mask.reshape(grid_t*flatten_padded_grid_h*flatten_padded_grid_w)
@@ -669,17 +679,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[window_index, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
+        # pad hidden states len
+        pad_len = pad_hidden_size - seq_len
+        padded_hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_len), "constant", 0)
+        # pad attention_mask len
         attention_mask = attention_mask.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit
         )
-        # pad hidden states
-        pad_len = pad_hidden_size - seq_len
-        padded_hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_len), "constant", 0)
-
         attention_mask = attention_mask[window_index, :]
         attention_mask = attention_mask.reshape(1,1,1,seq_len)
         attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_len), "constant", False)
-
+        #pad rotary_pos_emb len
         seq_len, _ = rotary_pos_emb.size()
         rotary_pos_emb = rotary_pos_emb.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
@@ -709,9 +719,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
             window_index: torch.Tensor,
             padded_grid_thw: torch.Tensor,
             grid_thw: torch.Tensor,):
+
         reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
-        _, hidden_emb_size = hidden_states.size()
+        # remove padding
         grid_t, gird_h, grid_w = grid_thw[0]
         llm_grid_h = gird_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
@@ -719,7 +730,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         padded_llm_grid_h = padded_grid_h // self.spatial_merge_size
         padded_llm_grid_w = padded_grid_w // self.spatial_merge_size
         hidden_states = hidden_states.reshape(grid_t, padded_llm_grid_h, padded_llm_grid_w, -1)
-        orig_hidden_states = torch.zeros(grid_t, llm_grid_h, llm_grid_w, hidden_emb_size, device=hidden_states.device)
         orig_hidden_states = hidden_states[:, :llm_grid_h, :llm_grid_w, :]
         orig_hidden_states = orig_hidden_states.reshape(grid_t*llm_grid_h*llm_grid_w, -1)
         return orig_hidden_states
