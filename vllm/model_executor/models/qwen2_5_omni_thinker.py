@@ -65,6 +65,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens
 
@@ -79,6 +80,7 @@ except (ImportError, ModuleNotFoundError):
     flash_attn = None
 
 logger = init_logger(__name__)
+is_hpu = current_platform.is_hpu()
 
 
 def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -696,7 +698,22 @@ class Qwen2_5OmniConditionalGenerationMixin:
         assert grid_thw.ndim == 2
 
         pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        if is_hpu:
+            image_embeds = []
+            pixel_offset_start = 0
+            for image_i, _ in enumerate(grid_thw):
+                grid_t, grid_h, grid_w = grid_thw[image_i]
+                pixel_offset_end = pixel_offset_start + grid_t*grid_h*grid_w
+                visual_kwarg, postprosess_kwarg = \
+                    self.visual.preprocess_hpu(pixel_values[pixel_offset_start:pixel_offset_end,:],
+                                                grid_thw=grid_thw[image_i:image_i+1])[0]
+                pixel_offset_start = pixel_offset_end
+                embeds = self.visual(**visual_kwarg)
+                embeds = self.visual.postprocess_hpu(hidden_states=embeds, **postprosess_kwarg)
+                image_embeds.append(embeds)
+            image_embeds = torch.cat(image_embeds, dim=0)
+        else:
+            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -716,7 +733,23 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
-        video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+        if is_hpu:
+            video_embeds = []
+            pixel_offset_start = 0
+            for image_i, _ in enumerate(grid_thw):
+                grid_t, grid_h, grid_w = grid_thw[image_i]
+                pixel_offset_end = pixel_offset_start + grid_t*grid_h*grid_w
+                kwargs = \
+                    self.visual.preprocess_hpu(pixel_values_videos[pixel_offset_start:pixel_offset_end,:],
+                                                grid_thw=grid_thw[image_i:image_i+1])
+                pixel_offset_start = pixel_offset_end
+                for visual_kwarg, postprosess_kwarg in kwargs:
+                    embeds = self.visual(**visual_kwarg)
+                    embeds = self.visual.postprocess_hpu(hidden_states=embeds, **postprosess_kwarg)
+                    video_embeds.append(embeds)
+            video_embeds = torch.cat(video_embeds, dim=0)
+        else:
+            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
