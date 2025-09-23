@@ -511,6 +511,15 @@ class Qwen3_VisionTransformer(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                if "ln_q." in name:
+                    name = name.replace("ln_q.", "norm.")
+                if "mlp.0." in name:
+                    name = name.replace("mlp.0.", "linear_fc1.")
+                if "mlp.2." in name:
+                    name = name.replace("mlp.2.", "linear_fc2.")
+                if "merger_list." in name:
+                    name = name.replace("merger_list.",
+                                        "deepstack_merger_list.")
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -1121,7 +1130,11 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         orig_to_new_prefix={
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
             "model.language_model.": "language_model.model.",
+            # "visual.merger.ln_q.": "visual.merger.norm.",
+            # "visual.merger.mlp.0.": "visual.merger.linear_fc1.",
+            # "visual.merger.mlp.2.": "visual.merger.linear_fc2.",
         })
 
     @classmethod
@@ -1610,6 +1623,9 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
+        weights = ((name[8:], weight) for name, weight in weights
+                   if not (name.startswith("talker") or name.startswith(
+                       "code2wav") or name.startswith("thinker.audio")))
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

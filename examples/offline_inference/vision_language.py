@@ -1075,6 +1075,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         prompts=prompts,
     )
 
+
 # Qwen3-VL-Dense
 def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Qwen/Qwen3-VL-4B-Instruct"
@@ -1114,7 +1115,8 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
 
 # Qwen3-VL-MOE
 def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    # model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    model_name = "/root/workspace/HF_models/Qwen3-Omni-30B-A3B-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,
