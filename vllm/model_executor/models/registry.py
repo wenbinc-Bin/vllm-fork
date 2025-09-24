@@ -222,7 +222,9 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5OmniForConditionalGeneration": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": ("qwen3_vl_moe", "Qwen3VLMoeForConditionalGeneration"),  # noqa: E501
-    "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
+    "Qwen3OmniMoeForConditionalGeneration": ("qwen3_omni_moe_thinker", "Qwen3OmniMoeThinkerForConditionalGeneration"), # noqa: E501
+    "Qwen3OmniMoeModel": ("qwen3_omni_moe_thinker", "Qwen3OmniMoeThinkerForConditionalGeneration"), # noqa: E501
+    "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"), # noqa: E501
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
