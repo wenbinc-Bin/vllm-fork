@@ -703,6 +703,12 @@ class Qwen3NextAttention(nn.Module):
 
         attn_output = self.attn(q, k, v)
 
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata.is_prompt and attn_metadata.attn_bias is not None:
+            attn_mask = (attn_metadata.input_positions != 0).unsqueeze(1)
+            attn_output = attn_output * attn_mask
+
         if self.attn_output_gate:
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
@@ -804,7 +810,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-
         if self.layer_type == "linear_attention":
             self_attention_output = self.linear_attn(
                 hidden_states=hidden_states, )
@@ -816,7 +821,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
         hidden_states = self_attention_output
-
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
                 hidden_states = hidden_states * (

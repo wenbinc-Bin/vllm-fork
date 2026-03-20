@@ -193,10 +193,16 @@ def torch_chunk_gated_delta_rule(
     beta,
     eye_constant,
     chunk_size=64,
+    block_size=None,
     initial_state=None,
     output_final_state=True,
     use_qk_l2norm_in_kernel=True,
+    output_block_state=False,
 ):
+    if output_block_state:
+        assert block_size is not None, "block_size must be specified when output_block_state is True"
+        assert block_size % chunk_size == 0, "block_size must be a multiple of chunk_size"
+        num_chunk_per_block = block_size // chunk_size
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
         head_dim = query.size(-1)
@@ -253,6 +259,10 @@ def torch_chunk_gated_delta_rule(
     last_recurrent_state = (torch.zeros(batch_size, num_heads, k_head_dim,
                                         v_head_dim).to(value) if initial_state
                             is None else initial_state.to(value))
+    if output_block_state:
+        block_num = tot_len // block_size
+        block_recurrent_state = torch.zeros(
+            block_num, batch_size, num_heads, k_head_dim, v_head_dim)
     core_attn_out = torch.zeros_like(value)
     mask = torch.tril(torch.ones(chunk_size,
                                  chunk_size,
@@ -274,6 +284,9 @@ def torch_chunk_gated_delta_rule(
         last_recurrent_state = (
             last_recurrent_state * g_exp[:, :, i, -1, None, None] +
             k_term[:, :, i].transpose(-1, -2) @ v_new)
+        if output_block_state and (i + 1) % num_chunk_per_block == 0:
+            block_idx = i // num_chunk_per_block
+            block_recurrent_state[block_idx] = last_recurrent_state
 
     if not output_final_state:
         last_recurrent_state = None
@@ -284,7 +297,11 @@ def torch_chunk_gated_delta_rule(
                                           core_attn_out.shape[-1])
     core_attn_out = core_attn_out[:, :, :sequence_length]
     core_attn_out = core_attn_out.transpose(1, 2).to(initial_dtype)
-    return core_attn_out, last_recurrent_state
+    if not output_block_state:
+        return core_attn_out, last_recurrent_state
+    else:
+        block_recurrent_state = block_recurrent_state.to(initial_dtype)
+        return core_attn_out, last_recurrent_state, block_recurrent_state
 
 
 def torch_recurrent_gated_delta_rule(
