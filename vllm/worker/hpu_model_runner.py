@@ -1928,6 +1928,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
             context_len = seq_data.get_num_computed_tokens()
+            if self.use_prefix_caching and seq_group_metadata.multi_modal_data:
+                context_len = 0
+                computed_block_nums = None
             # We should use get_len here because in case of preemption
             # it contains output tokens.
             seq_len = min(seq_data.get_len(), context_len + token_chunk_size)
