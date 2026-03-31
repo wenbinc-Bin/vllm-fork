@@ -13,7 +13,6 @@ import jinja2
 import partial_json_parser
 import regex as re
 from fastapi import Request
-from partial_json_parser.core.options import Allow
 from pydantic import TypeAdapter
 
 import vllm.envs as envs
@@ -37,7 +36,6 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.entrypoints.openai.tool_parsers.utils import partial_json_loads
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -366,12 +364,8 @@ class OpenAIServingChat(OpenAIServing):
             # if the current text is empty, we cannot parse it
             return None, function_name_returned
         try:
-            flags = Allow.ALL
-            obj, _ = partial_json_loads(current_text, flags)
-        except (
-                partial_json_parser.core.exceptions.MalformedJSON,
-                json.JSONDecodeError,
-        ):
+            obj = partial_json_parser.loads(current_text)
+        except partial_json_parser.core.exceptions.MalformedJSON:
             logger.debug('not enough tokens to parse into JSON yet')
             obj = None
 
@@ -397,7 +391,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not function_name_returned:
                     # get partly generated arguments from the latest tool call
                     param_match = re.search(r'.*"parameters":\s*(.*)',
-                                            current_text, re.DOTALL)
+                                            current_text)
                     arguments = param_match.group(1) if param_match else ""
                     arguments, _ = OpenAIServingChat._filter_delta_text(
                         arguments, previous_text)
@@ -472,9 +466,6 @@ class OpenAIServingChat(OpenAIServing):
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
 
-        # Always track previous_texts for comprehensive output logging
-        previous_texts = [""] * num_choices
-
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
         if tool_choice_auto or self.reasoning_parser:
@@ -484,10 +475,11 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
-            prompt_is_reasoning_end_arr: list[bool
-                                              | None] = [None] * num_choices
-        else:
+        elif request.tool_choice == "required":
+            previous_texts = [""] * num_choices
             all_previous_token_ids = None
+        else:
+            previous_texts, all_previous_token_ids = None, None
 
         try:
             if self.reasoning_parser:
@@ -607,13 +599,6 @@ class OpenAIServingChat(OpenAIServing):
                     i = output.index
                     tool_parser = tool_parsers[i]
 
-                    if (self.reasoning_parser and res.prompt_token_ids
-                            and prompt_is_reasoning_end_arr[i] is None):
-                        # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(
-                                res.prompt_token_ids))
                     if finish_reason_sent[i]:
                         continue
 
@@ -653,15 +638,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        # When encountering think end id in prompt_token_ids
-                        # i.e {"enable_thinking": False},
-                        # check BEFORE calling the parser to avoid a spurious
-                        # reasoning delta on the first chunk.
-                        if (self.reasoning_parser and not reasoning_end_arr[i]
-                                and prompt_is_reasoning_end_arr[i]):
-                            reasoning_end_arr[i] = True
-
-                        if (self.reasoning_parser and not reasoning_end_arr[i]
+                        if (self.reasoning_parser
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
@@ -676,11 +653,10 @@ class OpenAIServingChat(OpenAIServing):
                                     output.token_ids,
                                 ))
                             # When encountering think end id in delta_token_ids,
-                            # set reasoning status to end.
-                            # Only keep 'content', remove 'reasoning_content'.
+                            # process the `content`. Only keep 'content',
+                            # remove 'reasoning_content'
                             if reasoning_parser.is_reasoning_end(
                                     list(output.token_ids)):
-                                reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
                                     current_text = delta_message.content
@@ -718,12 +694,32 @@ class OpenAIServingChat(OpenAIServing):
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
 
-                        if (self.reasoning_parser is not None
-                                and not reasoning_end_arr[i]
-                                and prompt_is_reasoning_end_arr[i]):
-                            reasoning_end_arr[i] = True
+                        if self.reasoning_parser:
+                            _, content = \
+                                reasoning_parser.extract_reasoning_content(
+                                    current_text,
+                                    request
+                                )
+                        else:
+                            content = current_text
+                        delta_message, function_name_returned[i] = (
+                            self.extract_tool_call_required_streaming(
+                                previous_text=previous_text,
+                                current_text=content,
+                                delta_text=delta_text,
+                                function_name_returned=fn_name_returned))
 
-                        if self.reasoning_parser and not reasoning_end_arr[i]:
+                        # update the previous values for the next iteration
+                        previous_texts[i] = current_text
+
+                    # handle streaming deltas for tools with "auto" tool choice
+                    # and reasoning parser
+                    elif tool_choice_auto and self.reasoning_parser:
+                        assert tool_parser is not None
+                        assert reasoning_parser is not None
+                        assert added_content_delta_arr is not None
+                        assert reasoning_end_arr is not None
+                        if not reasoning_end_arr[i]:
                             delta_message = (
                                 reasoning_parser.
                                 extract_reasoning_content_streaming(
@@ -734,52 +730,21 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-                            if reasoning_parser.is_reasoning_end(
-                                    output.token_ids):
+                            # When encountering think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Remove the text and token ids related
+                            # to 'reasoning_content'.
+                            if res.prompt_token_ids and \
+                                reasoning_parser.is_reasoning_end(
+                                    list(res.prompt_token_ids)):
                                 reasoning_end_arr[i] = True
+                                current_token_ids = list(output.token_ids)
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
-                                    # reasoning ended
                                     current_text = ""
-                        else:
-                            # either finished reasoning or no reasoning at all
-                            content = current_text
-                            delta_message, function_name_returned[i] = (
-                                self.extract_tool_call_required_streaming(
-                                    previous_text=previous_text,
-                                    current_text=content,
-                                    delta_text=delta_text,
-                                    function_name_returned=fn_name_returned))
-
-                    # handle streaming deltas for tools with "auto" tool choice
-                    # and reasoning parser
-                    elif tool_choice_auto and self.reasoning_parser:
-                        assert tool_parser is not None
-                        assert reasoning_parser is not None
-                        assert added_content_delta_arr is not None
-                        assert reasoning_end_arr is not None
-                        if not reasoning_end_arr[i]:
-                            # When encountering think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
-                            # set reasoning status to end.
-                            if prompt_is_reasoning_end_arr[i]:
-                                reasoning_end_arr[i] = True
-                                current_token_ids = list(output.token_ids)
-                                # Keep current_text from delta
-                            else:
-                                delta_message = (
-                                    reasoning_parser.
-                                    extract_reasoning_content_streaming(
-                                        previous_text,
-                                        current_text,
-                                        delta_text,
-                                        previous_token_ids,
-                                        current_token_ids,
-                                        output.token_ids,
-                                    ))
-
                             # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Remove the text and token ids related
@@ -797,7 +762,7 @@ class OpenAIServingChat(OpenAIServing):
                                     current_text = ""
 
                         # handle tool calls only after reasoning is done,
-                        if reasoning_end_arr[i]:
+                        else:
                             delta_token_ids = list(output.token_ids)
                             # First time to tool call,
                             # add the remaining text and token ids
@@ -832,23 +797,15 @@ class OpenAIServingChat(OpenAIServing):
                                 request=request))
                     # when only reasoning
                     elif self.reasoning_parser:
-                        # When encountering think end id in prompt_token_ids
-                        # i.e {"enable_thinking": False},
-                        # set reasoning status to end.
-                        # Route all generated tokens as content directly.
-                        if prompt_is_reasoning_end_arr[i]:
-                            delta_message = DeltaMessage(content=delta_text)
-                        else:
-                            delta_message = (
-                                reasoning_parser.
-                                extract_reasoning_content_streaming(
-                                    previous_text,
-                                    current_text,
-                                    delta_text,
-                                    previous_token_ids,
-                                    current_token_ids,
-                                    output.token_ids,
-                                ))
+                        delta_message = (reasoning_parser.
+                                         extract_reasoning_content_streaming(
+                                             previous_text,
+                                             current_text,
+                                             delta_text,
+                                             previous_token_ids,
+                                             current_token_ids,
+                                             output.token_ids,
+                                         ))
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
@@ -859,10 +816,6 @@ class OpenAIServingChat(OpenAIServing):
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
                         all_previous_token_ids[i] = current_token_ids
-                    else:
-                        # Update for comprehensive logging even in simple case
-                        assert previous_texts is not None
-                        previous_texts[i] += delta_text
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
@@ -910,23 +863,11 @@ class OpenAIServingChat(OpenAIServing):
                                     arguments)
 
                             # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON.
-                            # Tool parsers (e.g. Qwen3Coder) store
-                            # arguments as a JSON string in
-                            # prev_tool_call_arr. Calling json.dumps()
-                            # on an already-serialized string would
-                            # double-serialize it (e.g. '{"k":1}' becomes
-                            # '"{\\"k\\":1}"'), which then causes the
-                            # replace() below to fail and append the
-                            # entire double-serialized string as a
-                            # spurious final delta.
-                            args = tool_parser.prev_tool_call_arr[index].get(
-                                "arguments", {})
-                            if isinstance(args, str):
-                                expected_call = args
-                            else:
-                                expected_call = json.dumps(args,
-                                                           ensure_ascii=False)
+                            # parsing which "autocompletes" the JSON
+                            expected_call = json.dumps(
+                                tool_parser.prev_tool_call_arr[index].get(
+                                    "arguments", {}),
+                                ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
@@ -1116,7 +1057,6 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(
                     role=role,
                     content="",
-                    reasoning_content=reasoning_content,
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
