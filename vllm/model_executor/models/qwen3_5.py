@@ -715,6 +715,9 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 ),
             )
 
+        self.graph_break = os.environ.get("VLLM_MOE_GRAPH_BREAK",
+                                          "false").lower() == "true"
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -785,7 +788,6 @@ class Qwen3_5Model(Qwen3NextModel):
                 name,
                 shard_id,
                 expert_id,
-#                return_success=True,
             )
             if success:
                 loaded_local_expert = True
@@ -910,7 +912,6 @@ class Qwen3_5Model(Qwen3NextModel):
                             name_mapped,
                             shard_id=shard_id,
                             expert_id=expert_id,
-#                            return_success=True,
                         )
                     if success:
                         name = name_mapped
