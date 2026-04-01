@@ -257,6 +257,15 @@ def torch_chunk_gated_delta_rule(
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
+
+    if valid_seq_len is None:
+        valid_seq_len = torch.full((batch_size, ),
+                                   sequence_length,
+                                   dtype=torch.long,
+                                   device=key.device)
+    else:
+        valid_seq_len = valid_seq_len.to(device=key.device, dtype=torch.long)
+
     pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
     if pad_size > 0:
         query = F.pad(query, (0, 0, 0, pad_size))
@@ -265,6 +274,21 @@ def torch_chunk_gated_delta_rule(
         beta = F.pad(beta, (0, pad_size))
         g = F.pad(g, (0, pad_size))
     tot_len = sequence_length + pad_size
+
+    token_idx = torch.arange(tot_len, device=key.device).view(1, 1, tot_len)
+    valid_mask = (token_idx < valid_seq_len.view(batch_size, 1,
+                                                 1)).to(value.dtype)
+
+    query = query * valid_mask.unsqueeze(-1)
+    key = key * valid_mask.unsqueeze(-1)
+    value = value * valid_mask.unsqueeze(-1)
+    beta = beta * valid_mask
+    g = g * valid_mask
+
+    valid_chunk_cnt = torch.div(valid_seq_len + chunk_size - 1,
+                                chunk_size,
+                                rounding_mode='floor')
+
     scale = 1 / (query.shape[-1]**0.5)
     query = query * scale
 
