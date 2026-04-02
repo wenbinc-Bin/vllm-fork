@@ -381,9 +381,12 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                     mixed_qkv_with_pad.reshape(-1, qkv_dim),
                     dim=0,
                     index=conv_state_indices).reshape(-1, self.conv_kernel_size - 1, qkv_dim)
-                conv_cache.index_copy_(dim=0,
-                                      index=mamba_slot_mapping.flatten(),
-                                      source=prefill_conv_state)
+                mixed_qkv_with_pad = _save_conv_state(
+                    mixed_qkv_with_pad,
+                    prefill_conv_state,
+                    conv_cache,
+                    mamba_slot_mapping.flatten()
+                )
             seq_offset = prefill_part["seq_len"]
             for idx in range(self.conv_kernel_size):
                 qkv_slice = mixed_qkv_with_pad[:, idx:(idx + seq_offset), :]
@@ -440,6 +443,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                         ssm_cache=ssm_cache,
                         mamba_slot_mapping=mamba_slot_mapping,
                         valid_seq_len=valid_seq_len,
+                        save_cache_fn=_save_ssm_state,
                     )
                 )
             else:
@@ -458,9 +462,10 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                         valid_seq_len=valid_seq_len,
                     ))
                 if ssm_cache is not None:
-                    ssm_cache.index_copy_(dim=0,
-                              index=mamba_slot_mapping[:,0],
-                              source=last_recurrent_state)
+                    prefill_core_attn_out = _save_ssm_state(prefill_core_attn_out,
+                        last_recurrent_state,
+                        ssm_cache,
+                        mamba_slot_mapping[:,0])
 
             if core_attn_out is None:
                 core_attn_out = prefill_core_attn_out.reshape(
@@ -626,9 +631,12 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                     mixed_qkv_with_pad.reshape(-1, qkv_dim),
                     dim=0,
                     index=conv_state_indices).reshape(-1, self.conv_kernel_size - 1, qkv_dim)
-                conv_cache.index_copy_(dim=0,
-                                      index=mamba_slot_mapping.flatten(),
-                                      source=prefill_conv_state)
+                mixed_qkv_with_pad = _save_conv_state(
+                    mixed_qkv_with_pad,
+                    prefill_conv_state,
+                    conv_cache,
+                    mamba_slot_mapping.flatten(),
+                )
             for idx in range(self.conv_kernel_size):
                 qkv_slice = mixed_qkv_with_pad[:, idx:(idx + seq_len), :]
                 conv1d_weight_slice = self.conv1d_weight[idx]
@@ -714,7 +722,9 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                         block_size=block_size,
                         ssm_cache=ssm_cache,
                         mamba_slot_mapping=mamba_slot_mapping,
-                        valid_seq_len=valid_seq_len))
+                        valid_seq_len=valid_seq_len,
+                        save_cache_fn=_save_ssm_state,
+                    ))
             else:
                 core_attn_out, last_recurrent_state = (
                     torch_chunk_gated_delta_rule_opt(
@@ -731,9 +741,10 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                         valid_seq_len=valid_seq_len))
                 if kv_cache is not None and isinstance(kv_cache, tuple):
                     ssm_cache = kv_cache[1]
-                    ssm_cache.index_copy_(dim=0,
-                                          index=mamba_slot_mapping[:,0],
-                                          source=last_recurrent_state)
+                    core_attn_out = _save_ssm_state(core_attn_out,
+                                last_recurrent_state,
+                                ssm_cache,
+                                mamba_slot_mapping[:,0])
         else:
             assert kv_cache is not None and isinstance(kv_cache, tuple)
             ssm_cache = kv_cache[1]
