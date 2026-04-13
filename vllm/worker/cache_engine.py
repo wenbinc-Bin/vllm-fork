@@ -144,11 +144,11 @@ class CacheEngine:
 
         dtype_size = get_dtype_size(dtype)
 
-        # For mamba cache
+        # For mamba cache, only needed when prefix_caching is enabled
         total_mamba_size = 0
         num_linear_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.mamba)
-        if num_linear_attention_layers > 0:
+        if num_linear_attention_layers > 0 and cache_config.enable_prefix_caching:
             tp_size = parallel_config.tensor_parallel_size
             conv_kernel_size = model_config.hf_text_config.linear_conv_kernel_dim
             num_v_heads = model_config.hf_text_config.linear_num_value_heads

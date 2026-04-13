@@ -3770,7 +3770,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         kv_caches = [None] * num_layers
         bind_kv_cache(
             self.vllm_config.compilation_config.static_forward_context,
-            [kv_caches] * self.parallel_config.pipeline_parallel_size)
+            [kv_caches] * self.parallel_config.pipeline_parallel_size,
+            self.cache_config.enable_prefix_caching)
         max_seq_len = self.bucketing_manager.get_max_prompt_shape()
         max_batch_size = min(self.max_num_seqs,
                              self.max_num_batched_tokens // max_seq_len)

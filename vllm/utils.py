@@ -2736,6 +2736,7 @@ def get_mp_context():
 def bind_kv_cache(
         ctx: dict[str, Any],
         kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+        enable_prefix_caching: bool = False,
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2769,14 +2770,15 @@ def bind_kv_cache(
     ]
     _bind_kv_cache(layer_need_kv_cache, 0)
 
-    # for mamba
-    offset = len(layer_need_kv_cache)
-    layer_need_kv_cache = [
-        layer_name for layer_name in ctx
-        if (hasattr(ctx[layer_name], 'mamba_type') and
-            ctx[layer_name].mamba_type == "linear_attention")
-    ]
-    _bind_kv_cache(layer_need_kv_cache, offset)
+    # for mamba, only bind when prefix_caching is enabled
+    if enable_prefix_caching:
+        offset = len(layer_need_kv_cache)
+        layer_need_kv_cache = [
+            layer_name for layer_name in ctx
+            if (hasattr(ctx[layer_name], 'mamba_type') and
+                ctx[layer_name].mamba_type == "linear_attention")
+        ]
+        _bind_kv_cache(layer_need_kv_cache, offset)
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],

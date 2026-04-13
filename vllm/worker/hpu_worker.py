@@ -412,7 +412,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
         bind_kv_cache(self.compilation_config.static_forward_context,
-                      self.hpu_cache)
+                      self.hpu_cache,
+                      self.cache_config.enable_prefix_caching)
 
     def _warm_up_model(self) -> None:
         # NOTE(kzawora): We should use virtual engine index here
@@ -626,10 +627,12 @@ class HPUCacheEngine(CacheEngine):
             kv_layer = (key_cache, value_cache)
             kv_cache.append(kv_layer)
 
-        # For mamba cache
-        num_linear_attention_layers = (self.model_config.
-              get_num_layers_by_block_type(
-              self.parallel_config, LayerBlockType.mamba))
+        # For mamba cache, only needed when prefix_caching is enabled
+        num_linear_attention_layers = 0
+        if self.cache_config.enable_prefix_caching:
+            num_linear_attention_layers = (self.model_config.
+                  get_num_layers_by_block_type(
+                  self.parallel_config, LayerBlockType.mamba))
         for _ in range(num_linear_attention_layers):
             tp_size = self.parallel_config.tensor_parallel_size
             conv_kernel_size = self.model_config.hf_text_config.linear_conv_kernel_dim
