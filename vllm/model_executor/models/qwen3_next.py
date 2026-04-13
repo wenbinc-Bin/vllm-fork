@@ -322,7 +322,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                                 divide(self.num_v_heads, self.tp_size),
                                 self.head_k_dim, self.head_v_dim)
 
-        if config.model_type in ["qwen3_5_text", "qwen3_5_moe_text"]:
+        if config.model_type in ["qwen3_5_text", "qwen3_5_moe_text"] and \
+            cache_config.enable_prefix_caching:
             # Qwen3.5 uses self.kv_cache to store both conv_state and ssm_state
             # so we don't need to allocate
             self.conv_state = None
