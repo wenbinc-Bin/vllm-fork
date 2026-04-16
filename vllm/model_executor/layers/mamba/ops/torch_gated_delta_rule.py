@@ -26,7 +26,8 @@ def torch_chunk_gated_delta_rule_opt(
     mamba_slot_mapping=None,
     save_cache_fn=None,
 ):
-    write_block_state_to_ssm_cache = ssm_cache is not None or mamba_slot_mapping is not None
+    write_block_state_to_ssm_cache = ssm_cache is not None \
+        or mamba_slot_mapping is not None
     if write_block_state_to_ssm_cache:
         assert ssm_cache is not None, \
             "ssm_cache must be specified when writing block state"
@@ -159,18 +160,37 @@ def torch_chunk_gated_delta_rule_opt(
     C = C * valid_mask.unsqueeze(-1)
     core_attn_out = core_attn_out * valid_mask.unsqueeze(-1)
 
+    # Pre-allocate tensors for batched cache write to avoid repeated
+    # index_copy_ calls in the loop which are slow.
+    if write_block_state_to_ssm_cache:
+        total_blocks = num_chunks // num_chunk_per_block
+        all_states = torch.empty(total_blocks * batch_size,
+                                 num_heads,
+                                 k_head_dim,
+                                 v_head_dim,
+                                 dtype=ssm_cache.dtype,
+                                 device=ssm_cache.device)
+        all_indices = mamba_slot_mapping[:, :total_blocks].reshape(-1)
+        block_write_idx = 0
+
     # for each chunk
     for i in range(num_chunks):
         core_attn_out[:, :,
                       i].add_(torch.matmul(C[:, :, i], last_recurrent_state))
         last_recurrent_state = torch.matmul(M[:, :, i],
                                             last_recurrent_state) + N[:, :, i]
-        if write_block_state_to_ssm_cache and (i + 1) % num_chunk_per_block == 0:
-            block_idx = i // num_chunk_per_block
-            block_i_mapping = mamba_slot_mapping[:, block_idx]
-            core_attn_out = save_cache_fn(
-                core_attn_out, last_recurrent_state.to(ssm_cache.dtype),
-                ssm_cache, block_i_mapping)
+        if write_block_state_to_ssm_cache and (i +
+                                               1) % num_chunk_per_block == 0:
+            all_states[block_write_idx * batch_size:(block_write_idx + 1) *
+                       batch_size] = \
+                last_recurrent_state.to(ssm_cache.dtype)
+            block_write_idx += 1
+
+    # Batched save: single index_copy_ instead of one per block
+    if write_block_state_to_ssm_cache and block_write_idx > 0:
+        core_attn_out = save_cache_fn(
+            core_attn_out, all_states[:block_write_idx * batch_size],
+            ssm_cache, all_indices[:block_write_idx * batch_size])
 
     if not output_final_state:
         last_recurrent_state = None
