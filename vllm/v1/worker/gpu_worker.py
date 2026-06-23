@@ -509,10 +509,10 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
+        # XPU is included to profile XPU graph memory (see #197).
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda_alike()
+            (current_platform.is_cuda_alike() or current_platform.is_xpu())
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
