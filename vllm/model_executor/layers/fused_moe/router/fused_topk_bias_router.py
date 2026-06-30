@@ -82,6 +82,22 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        torch.ops._moe_C.topk_softplus_sqrt(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+        )
+        return topk_weights, topk_indices
+
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,
