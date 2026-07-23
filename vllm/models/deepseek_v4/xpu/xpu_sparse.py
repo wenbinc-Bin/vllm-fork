@@ -47,12 +47,16 @@ if TYPE_CHECKING:
 # Optional xattention (flash_attn) backend
 # ---------------------------------------------------------------------------
 try:
-    from flash_attn.flash_attn_interface_xpu import (
+    # xattention rebased its public API: the MLA sparse kernels moved from
+    # ``flash_attn.flash_attn_interface_xpu`` to the top-level ``xattention``
+    # package (``xattention.flash_mla_interface``). Import from the new path.
+    from xattention import (
         flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
     )
-    from flash_attn.flash_attn_interface_xpu import (
+    from xattention import (
         flash_mla_with_kvcache as _flash_mla_with_kvcache,
     )
+
     _XATTN_AVAILABLE = True
 except ImportError:
     _XATTN_AVAILABLE = False
@@ -251,8 +255,14 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
 
         assert swa_indices is not None and swa_lens is not None
         self._run_decode_attn(
-            q, kv_cache, swa_indices, swa_lens, topk_indices, topk_lens,
-            swa_only, output,
+            q,
+            kv_cache,
+            swa_indices,
+            swa_lens,
+            topk_indices,
+            topk_lens,
+            swa_only,
+            output,
         )
 
     def _run_decode_attn(
