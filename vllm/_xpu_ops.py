@@ -295,6 +295,24 @@ def _xpu_fp8_bmm_fake(
     )
 
 
+_XATTENTION_MQA_LOGITS = None
+
+
+def _xattention_mqa_logits_module():
+    """Import the xattention MQA logits implementations lazily.
+
+    The MQA logits kernels are provided by `xattention`; `vllm_xpu_kernels` is
+    expected to be built with `MQA_LOGITS_KERNELS_ENABLED=0` so that only one
+    copy of these kernels is loaded into the process.
+    """
+    global _XATTENTION_MQA_LOGITS
+    if _XATTENTION_MQA_LOGITS is None:
+        from xattention import mqa_logits_interface
+
+        _XATTENTION_MQA_LOGITS = mqa_logits_interface
+    return _XATTENTION_MQA_LOGITS
+
+
 def _xpu_fp8_mqa_logits_impl(
     q: torch.Tensor,
     k_quant: torch.Tensor,
@@ -303,7 +321,7 @@ def _xpu_fp8_mqa_logits_impl(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.ops._xpu_C.fp8_mqa_logits(
+    return _xattention_mqa_logits_module().fp8_mqa_logits(
         q,
         k_quant,
         k_scale,
@@ -337,7 +355,7 @@ def _xpu_fp8_paged_mqa_logits_impl(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
 ) -> torch.Tensor:
-    return torch.ops._xpu_C.fp8_paged_mqa_logits(
+    return _xattention_mqa_logits_module().fp8_paged_mqa_logits(
         q,
         kv_cache,
         weights,
