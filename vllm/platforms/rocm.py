@@ -205,8 +205,14 @@ def _get_gcn_arch() -> str:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-    # Ultimate fallback: use torch.cuda (will initialize CUDA)
-    return torch.cuda.get_device_properties("cuda").gcnArchName
+    # Ultimate fallback: use torch.cuda (will initialize CUDA). This module can
+    # be imported on non-ROCm platforms (e.g. XPU) from shared kernel code, so
+    # never let arch detection break the import.
+    try:
+        return torch.cuda.get_device_properties("cuda").gcnArchName
+    except Exception as e:
+        logger.debug("Failed to get GCN arch via torch.cuda: %s", e)
+        return ""
 
 
 # Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
